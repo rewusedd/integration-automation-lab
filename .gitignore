@@ -205,3 +205,13 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+# local env
+.env
+
+# python
+.venv/
+__pycache__/
+*.pyc
+
+# n8n exports or local data (позже решим точнее)
+n8n/.local/
