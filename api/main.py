@@ -1,7 +1,12 @@
 from datetime import datetime, timezone
-from fastapi import FastAPI, Query
+from typing import Literal
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
 app = FastAPI(title="Integration Automation Lab API")
+
+attempt_store: dict[str, int] = {}
 
 
 @app.get("/health")
@@ -10,40 +15,107 @@ def health():
 
 
 @app.get("/demo/items")
-def demo_items(
-    page: int = Query(default=1, ge=1),
-    limit: int = Query(default=2, ge=1, le=5),
-):
-    all_items = [
+def demo_items(limit: int = 3):
+    items = [
         {
             "id": f"item-{i}",
             "name": f"demo-item-{i}",
             "price": i * 10,
-            "status": "new" if i % 2 else "processed",
+            "status": "new",
         }
-        for i in range(1, 8)
+        for i in range(1, limit + 1)
     ]
-
-    total_items = len(all_items)
-    total_pages = (total_items + limit - 1) // limit
-
-    start_idx = (page - 1) * limit
-    end_idx = start_idx + limit
-
-    items = all_items[start_idx:end_idx]
-
-    has_more = page < total_pages
-    next_page = page + 1 if has_more else None
 
     return {
         "source": "demo_items",
         "fetched_at": datetime.now(timezone.utc).isoformat(),
-        "page": page,
-        "limit": limit,
         "count": len(items),
-        "total_items": total_items,
-        "total_pages": total_pages,
-        "has_more": has_more,
-        "next_page": next_page,
         "items": items,
     }
+
+
+class RetryLabRequest(BaseModel):
+    request_key: str = Field(..., min_length=1)
+    mode: Literal["success", "flaky_429", "flaky_500", "bad_input"]
+    fail_times: int = Field(0, ge=0, le=10)
+    attempt: int = Field(1, ge=1)
+    payload: dict = Field(default_factory=dict)
+
+
+@app.post("/demo/retry-lab")
+def retry_lab(req: RetryLabRequest):
+    # permanent error branch
+    if req.mode == "bad_input":
+        return JSONResponse(
+            status_code=400,
+            content={
+                "ok": False,
+                "retryable": False,
+                "error_code": "bad_input",
+                "message": "Demo permanent error: bad input",
+                "request_key": req.request_key,
+                "attempt": req.attempt,
+            },
+        )
+
+    if "name" not in req.payload:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "ok": False,
+                "retryable": False,
+                "error_code": "validation_error",
+                "message": "payload.name is required",
+                "request_key": req.request_key,
+                "attempt": req.attempt,
+            },
+        )
+
+    key = f"{req.request_key}:{req.mode}"
+    current_seen = attempt_store.get(key, 0) + 1
+    attempt_store[key] = current_seen
+
+    if req.mode == "flaky_429" and current_seen <= req.fail_times:
+        return JSONResponse(
+            status_code=429,
+            headers={"Retry-After": "2"},
+            content={
+                "ok": False,
+                "retryable": True,
+                "error_code": "rate_limited",
+                "message": f"429 simulated on internal hit #{current_seen}",
+                "request_key": req.request_key,
+                "attempt": req.attempt,
+                "internal_seen": current_seen,
+            },
+        )
+
+    if req.mode == "flaky_500" and current_seen <= req.fail_times:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "ok": False,
+                "retryable": True,
+                "error_code": "server_error",
+                "message": f"500 simulated on internal hit #{current_seen}",
+                "request_key": req.request_key,
+                "attempt": req.attempt,
+                "internal_seen": current_seen,
+            },
+        )
+
+    return {
+        "ok": True,
+        "retryable": False,
+        "message": "success",
+        "request_key": req.request_key,
+        "attempt": req.attempt,
+        "internal_seen": current_seen,
+        "payload": req.payload,
+    }
+
+
+@app.post("/demo/retry-lab/reset")
+def retry_lab_reset():
+    attempt_store.clear()
+    return {"ok": True, "message": "attempt store cleared"}
