@@ -1,14 +1,28 @@
+import os
 from datetime import datetime, timezone
 from typing import Any, Literal
 from uuid import uuid4
 
-from fastapi import FastAPI
+import psycopg
+from psycopg.types.json import Jsonb
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 app = FastAPI(title="Integration Automation Lab API")
 
 attempt_store: dict[str, int] = {}
+
+
+def get_db_connection():
+    return psycopg.connect(
+        host=os.getenv("POSTGRES_HOST", "postgres"),
+        port=int(os.getenv("POSTGRES_PORT", "5432")),
+        dbname=os.getenv("POSTGRES_DB", "app"),
+        user=os.getenv("POSTGRES_USER", "app"),
+        password=os.getenv("POSTGRES_PASSWORD", "app"),
+        autocommit=False,
+    )
 
 
 @app.get("/health")
@@ -43,6 +57,7 @@ class RetryLabRequest(BaseModel):
     attempt: int = Field(1, ge=1)
     payload: dict = Field(default_factory=dict)
 
+
 class ProcessRequest(BaseModel):
     request_id: str | None = None
     source: str = Field(..., min_length=1)
@@ -54,7 +69,6 @@ class ProcessRequest(BaseModel):
 
 @app.post("/demo/retry-lab")
 def retry_lab(req: RetryLabRequest):
-    # permanent error branch
     if req.mode == "bad_input":
         return JSONResponse(
             status_code=400,
@@ -130,17 +144,92 @@ def retry_lab_reset():
     attempt_store.clear()
     return {"ok": True, "message": "attempt store cleared"}
 
-@app.post("/process")
+
+@app.post("/process", status_code=202)
 def process(req: ProcessRequest):
     request_id = req.request_id or str(uuid4())
 
-    return {
-        "ok": True,
-        "message": "boundary contract accepted",
-        "request_id": request_id,
-        "source": req.source,
-        "event_id": req.event_id,
-        "idempotency_key": req.idempotency_key,
-        "trace_metadata": req.trace_metadata,
-        "payload": req.payload,
-    }
+    insert_sql = """
+    INSERT INTO app.events_inbox (
+        request_id,
+        source,
+        event_id,
+        idempotency_key,
+        trace_metadata,
+        payload,
+        status,
+        attempts
+    )
+    VALUES (%s, %s, %s, %s, %s, %s, 'received', 0)
+    ON CONFLICT (source, event_id)
+    DO NOTHING
+    RETURNING id, received_at, status;
+    """
+
+    select_existing_sql = """
+    SELECT id, request_id, received_at, status
+    FROM app.events_inbox
+    WHERE source = %s AND event_id = %s;
+    """
+
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    insert_sql,
+                    (
+                        request_id,
+                        req.source,
+                        req.event_id,
+                        req.idempotency_key,
+                        Jsonb(req.trace_metadata),
+                        Jsonb(req.payload),
+                    ),
+                )
+                row = cur.fetchone()
+
+                if row is not None:
+                    inbox_id, received_at, status = row
+                    conn.commit()
+                    return {
+                        "ok": True,
+                        "message": "event accepted",
+                        "request_id": request_id,
+                        "inbox_id": inbox_id,
+                        "source": req.source,
+                        "event_id": req.event_id,
+                        "status": status,
+                        "received_at": received_at.isoformat(),
+                        "duplicate": False,
+                    }
+
+                cur.execute(select_existing_sql, (req.source, req.event_id))
+                existing = cur.fetchone()
+                conn.commit()
+
+                if existing is None:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="inbox conflict detected but existing row not found",
+                    )
+
+                inbox_id, existing_request_id, received_at, status = existing
+                return JSONResponse(
+                    status_code=200,
+                    content={
+                        "ok": True,
+                        "message": "duplicate delivery acknowledged",
+                        "request_id": existing_request_id,
+                        "inbox_id": inbox_id,
+                        "source": req.source,
+                        "event_id": req.event_id,
+                        "status": status,
+                        "received_at": received_at.isoformat(),
+                        "duplicate": True,
+                    },
+                )
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"db_write_failed: {exc}")

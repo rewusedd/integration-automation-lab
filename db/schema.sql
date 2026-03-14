@@ -2,7 +2,7 @@ CREATE SCHEMA IF NOT EXISTS app;
 
 CREATE TABLE IF NOT EXISTS app.events_inbox (
   id BIGSERIAL PRIMARY KEY,
-  request_id TEXT NOT NULL UNIQUE,
+  request_id TEXT NOT NULL,
   source TEXT NOT NULL,
   event_id TEXT NOT NULL,
   idempotency_key TEXT,
@@ -43,7 +43,7 @@ CREATE INDEX IF NOT EXISTS idx_events_inbox_request_id
 CREATE INDEX IF NOT EXISTS idx_events_inbox_status
   ON app.events_inbox(status);
 
-CREATE INDEX IF NOT EXISTS idx_events_inbox_source_event
+CREATE UNIQUE INDEX IF NOT EXISTS uq_events_inbox_source_event
   ON app.events_inbox(source, event_id);
 
 CREATE INDEX IF NOT EXISTS idx_processing_runs_request_id
