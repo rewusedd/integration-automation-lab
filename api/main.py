@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Any, Literal
+from uuid import uuid4
+
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -40,6 +42,14 @@ class RetryLabRequest(BaseModel):
     fail_times: int = Field(0, ge=0, le=10)
     attempt: int = Field(1, ge=1)
     payload: dict = Field(default_factory=dict)
+
+class ProcessRequest(BaseModel):
+    request_id: str | None = None
+    source: str = Field(..., min_length=1)
+    event_id: str = Field(..., min_length=1)
+    idempotency_key: str | None = None
+    trace_metadata: dict[str, Any] = Field(default_factory=dict)
+    payload: dict[str, Any] = Field(default_factory=dict)
 
 
 @app.post("/demo/retry-lab")
@@ -119,3 +129,18 @@ def retry_lab(req: RetryLabRequest):
 def retry_lab_reset():
     attempt_store.clear()
     return {"ok": True, "message": "attempt store cleared"}
+
+@app.post("/process")
+def process(req: ProcessRequest):
+    request_id = req.request_id or str(uuid4())
+
+    return {
+        "ok": True,
+        "message": "boundary contract accepted",
+        "request_id": request_id,
+        "source": req.source,
+        "event_id": req.event_id,
+        "idempotency_key": req.idempotency_key,
+        "trace_metadata": req.trace_metadata,
+        "payload": req.payload,
+    }
