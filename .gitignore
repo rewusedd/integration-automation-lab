@@ -215,3 +215,6 @@ __pycache__/
 
 # n8n exports or local data (позже решим точнее)
 n8n/.local/
+
+# backups
+*.sql
