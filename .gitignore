@@ -218,3 +218,6 @@ n8n/.local/
 
 # backups
 *.sql
+
+# local scripts
+scripts/
